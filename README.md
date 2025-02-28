@@ -2,7 +2,7 @@
 
 ## Low Latency Document Analysis with AWS
 
-A sample Streamlit application for analyzing documents using AWS Textract and Bedrock - Amazon Nova Micro Model. Users can upload documents (images or PDFs) and get quick insights.
+A sample Streamlit application for analyzing documents using AWS Textract and Bedrock - Llama 3.3 70B Model. Users can upload documents (images or PDFs) and get quick insights.
 
 ## Architecture
 
@@ -36,6 +36,8 @@ Set the following environment variables:
 
 - `S3_BUCKET`: The name of your S3 bucket for document storage
 - `AWS_REGION`: The AWS region to use (defaults to "us-east-1" if not set)
+- `AWS_ACCESS_KEY_ID`: The Access key id that used to call the AWS api
+- `AWS_SECRET_ACCESS_KEY`: Access key secret used to call the AWS api
 
 You can set these variables in your environment or optionally use a `.env` file as below:
 
@@ -81,8 +83,14 @@ If you prefer to run this project in a Python virtual environment, follow these 
      source venv/bin/activate
      ```
    - On Windows:
+
+     If you get PSSecurityException (UnauthorizedAccess) setup this policy first:
      ```bash
-     venv\Scripts\activate
+     Set-ExecutionPolicy RemoteSigned -Scope Process
+     ```
+     Then execute the following:
+     ```bash
+     .\\venv\\Scripts\activate
      ```
 
 3. Install the required packages:
