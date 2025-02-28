@@ -18,9 +18,11 @@ load_dotenv()
 S3_BUCKET = os.environ.get("S3_BUCKET")
 if not S3_BUCKET:
     st.error("S3_BUCKET environment variable is not set!")
-    
+
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-MODEL_ID = "amazon.nova-micro-v1:0"
+# Uncomment the model you wish to use:
+# MODEL_ID = "amazon.nova-micro-v1:0"
+MODEL_ID = "meta.llama3-3-70b-instruct-v1:0"
 
 def upload_to_s3(file_obj, bucket, key):
     """Upload a file to S3"""
@@ -32,36 +34,17 @@ def upload_to_s3(file_obj, bucket, key):
         st.error(f"Error uploading to S3: {str(e)}")
         return False
 
-def invoke_bedrock_model(client: boto3.client, prompt: str, extracted_text: str) -> Optional[str]:
-    system_list = [
-        {
-            "text": "You are a helpful assistant that analyzes text from scanned documents"
-        }
-    ]
-
-    message_list = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "text": f"{prompt}:\n\n{extracted_text}\n\n"
-                }
-            ]
-        }
-    ]
-
-    inf_params = {
-        "max_new_tokens": 1000,
-        "top_p": 0.9,
-        "top_k": 20,
-        "temperature": 0.7
-    }
-
+def invoke_bedrock_model(client: boto3.client, prompt: str, temperature: float, top_p: float, max_gen_len: int) -> Optional[str]:
+    """
+    Invoke the Meta Llama 3 model using a properly formatted request payload.
+    The expected payload includes only 'prompt' along with optional keys 'temperature',
+    'top_p', and 'max_gen_len'.
+    """
     request_body = {
-        "schemaVersion": "messages-v1",
-        "messages": message_list,
-        "system": system_list,
-        "inferenceConfig": inf_params
+        "prompt": prompt,
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_gen_len": max_gen_len
     }
 
     try:
@@ -74,30 +57,28 @@ def invoke_bedrock_model(client: boto3.client, prompt: str, extracted_text: str)
 
         response_body = json.loads(response['body'].read())
         
-        if "output" in response_body:
-            message = response_body["output"]["message"]
-            if "content" in message and len(message["content"]) > 0:
-                return message["content"][0]["text"]
+        # Assuming the response contains a key "generation" with the generated text.
+        if "generation" in response_body:
+            return response_body["generation"]
         return ""
     
     except Exception as e:
         st.error(f"Error invoking model: {str(e)}")
         return ""
 
-def process_document(s3_key, custom_prompt):
+def process_document(s3_key, custom_prompt, temperature, top_p, max_gen_len):
     """
-    Process document with Textract and Bedrock.
+    Process a document by extracting text via Textract and then invoking Bedrock.
     
     Args:
-        s3_key (str): S3 object key of the uploaded document
-        custom_prompt (str): Custom prompt for Bedrock analysis
+        s3_key (str): S3 object key of the uploaded document.
+        custom_prompt (str): Custom prompt for Bedrock analysis.
+        temperature (float): Temperature parameter for text generation.
+        top_p (float): Top P (nucleus sampling) parameter.
+        max_gen_len (int): Maximum number of tokens to generate.
     
     Returns:
-        dict: Dictionary containing:
-            - extracted_text: Text extracted from document
-            - analysis_result: Analysis from Bedrock
-            - textract_time: Time taken by Textract
-            - bedrock_time: Time taken by Bedrock
+        dict: Contains extracted text, AI analysis result, and processing times.
     """
     try:
         # Initialize AWS clients
@@ -120,10 +101,13 @@ def process_document(s3_key, custom_prompt):
             )
         textract_time = time.time() - textract_start
 
+        # Combine custom prompt with the extracted text
+        full_prompt = f"{custom_prompt}\n\nExtracted Text:\n{extracted_text}"
+
         # Process with Bedrock and measure time
         bedrock_start = time.time()
         with st.spinner('Analyzing with Bedrock...'):
-            analysis_result = invoke_bedrock_model(bedrock_client, custom_prompt, extracted_text)
+            analysis_result = invoke_bedrock_model(bedrock_client, full_prompt, temperature, top_p, max_gen_len)
         bedrock_time = time.time() - bedrock_start
             
         return {
@@ -145,72 +129,62 @@ def process_document(s3_key, custom_prompt):
 def main():
     st.set_page_config(page_title="Document Analysis with AWS", layout="wide")
     
-    st.title("Low latency document Analysis with AWS")
-    st.write("Upload a document and analyze it using AWS Textract and Bedrock- Nova Micro")
+    st.title("Low Latency Document Analysis with AWS")
+    st.write("Upload a document and analyze it using AWS Textract and Bedrock (Meta Llama 3)")
 
-    # Main content area
+    # Layout: two columns for file input and process results
     col1, col2 = st.columns([1, 1])
 
-    # Add a sidebar for inference parameters
+    # Sidebar: Inference parameters
     with st.sidebar:
         st.header("Inference Parameters")
-        max_new_tokens = st.slider(
-            label="Maximum number of tokens to generate",
-            min_value=100,
+        max_gen_len = st.slider(
+            label="Maximum tokens to generate",
+            min_value=50,
             max_value=2000,
-            value=1000,
-            step=100
+            value=512,
+            step=50
         )
         temperature = st.slider(
-            label="Temperature (controls randomness)",
+            label="Temperature",
             min_value=0.0,
             max_value=1.0,
-            value=0.7,
+            value=0.5,
             step=0.1
         )
         top_p = st.slider(
-            label="Top P (nucleus sampling)",
+            label="Top P",
             min_value=0.0,
             max_value=1.0,
             value=0.9,
             step=0.1
         )
-        top_k = st.slider(
-            label="Top K (number of tokens to consider)",
-            min_value=1,
-            max_value=100,
-            value=20,
-            step=1
-        )
         
     with col1:
-        # File uploader
         uploaded_file = st.file_uploader(
             label="Upload your document",
             type=['png', 'jpg', 'jpeg', 'pdf']
         )
         
         # Custom prompt input
-        default_prompt = "Extract the following details from chemistry lab notes into CSV format: Chemical Compound Name, Initial Temperature (°C), Final Temperature (°C), Reaction Time (min). If any value is not specified, leave it blank. Output only the CSV record."
+        default_prompt = "Extract key information from the document and summarize it."
         custom_prompt = st.text_area(
             label="Enter your analysis prompt",
             value=default_prompt,
-            height=200,
+            height=150,
             help="Specify how you want the document to be analyzed"
         )
 
-        # Preview handling for different file types
+        # File preview handling for PDF and images
         if uploaded_file is not None:
             file_type = uploaded_file.type
             if file_type == "application/pdf":
                 try:
-                    # Create a temporary file to store the PDF
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                         tmp_file.write(uploaded_file.getvalue())
-                        tmp_file.flush()  # Flush the file buffer
+                        tmp_file.flush()
                         tmp_file_path = tmp_file.name
 
-                    # Read PDF and check number of pages
                     pdf_reader = PdfReader(tmp_file_path)
                     num_pages = len(pdf_reader.pages)
                     
@@ -219,7 +193,6 @@ def main():
                         uploaded_file = None
                     else:
                         st.write("PDF document preview:")
-                        # Display the text content of the page
                         page = pdf_reader.pages[0]
                         st.text_area(
                             label="PDF content",
@@ -228,7 +201,6 @@ def main():
                             disabled=True
                         )
                     
-                    # Clean up the temporary file
                     os.unlink(tmp_file_path)
                     
                 except Exception as e:
@@ -250,11 +222,10 @@ def main():
                 if upload_to_s3(uploaded_file, S3_BUCKET, s3_key):
                     st.success("File uploaded successfully!")
                     
-                    # Get results as a dictionary
-                    result = process_document(s3_key, custom_prompt)
+                    result = process_document(s3_key, custom_prompt, temperature, top_p, max_gen_len)
                     total_time = time.time() - total_start
                     
-                    # Display metrics
+                    # Display processing times
                     col1_metric, col2_metric, col3_metric = st.columns(3)
                     with col1_metric:
                         st.metric(label="Textract Processing Time", value=f"{result['textract_time']:.2f}s")
